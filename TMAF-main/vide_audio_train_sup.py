@@ -38,9 +38,7 @@ print(config)
 
 
 def main():
-    # utils variable
     global args, logger, writer, dataset_configs
-    # statistics variable
     global best_accuracy, best_accuracy_epoch
     best_accuracy, best_accuracy_epoch = 0, 0
 
@@ -51,7 +49,6 @@ def main():
     os.environ['CUDA_DEVICE_ORDER'] = "PCI_BUS_ID"
     os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
-    '''Create snapshot_pred dir for copying code and saving models '''
     if not os.path.exists(args.snapshot_pref):
         os.makedirs(args.snapshot_pref)
 
@@ -63,48 +60,28 @@ def main():
     if not args.evaluate:
         logger.info(f'\nCreating folder: {args.snapshot_pref}')
         logger.info('\nRuntime args\n\n{}\n'.format(json.dumps(vars(args), indent=4)))
-        logger.info('Protocol: official AVE split (train_order.h5 / test_order.h5) | eval=frame-level GT')
+        logger.info('Protocol: Train.txt/Test.txt | train+test loss/acc vs frame-level GT')
     else:
         logger.info(f'\nLog file will be save in a {args.snapshot_pref}/Eval.log.')
 
-    '''Dataset: official train_order.h5 / test_order.h5'''
-    train_dataset = AVEDatasetV2('./data/', split='train')
-    test_dataset = AVEDatasetV2('./data/', split='test')
-    train_vids = set(train_dataset.video_names)
-    test_vids = set(test_dataset.video_names)
-    overlap_vids = train_vids & test_vids
-    logger.info(
-        f"[Official Split] train={len(train_dataset)} test={len(test_dataset)} | "
-        f"unique train/test videos={len(train_vids)}/{len(test_vids)} | "
-        f"video-id overlap={len(overlap_vids)}"
-    )
-    if overlap_vids:
-        logger.info(
-            f"[Official Split] {len(overlap_vids)} 个重复视频 ID 来自 Annotations 双标注条目，"
-            f"labels.h5 索引本身无交集"
-        )
-    else:
-        logger.info("[Official Split] 训练/测试视频 ID 无交集")
-
     train_dataloader = DataLoader(
-        train_dataset,
+        AVEDatasetV2('./data/', split='train'),
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=0,
-        pin_memory=True
+        pin_memory=True,
     )
 
     test_dataloader = DataLoader(
-        test_dataset,
+        AVEDatasetV2('./data/', split='test'),
         batch_size=args.test_batch_size,
         shuffle=False,
         num_workers=0,
-        pin_memory=True
+        pin_memory=True,
     )
 
-    '''model setting'''
     mainModel = main_model(in_channels=10, feature_dim=768)
-    mainModel = nn.DataParallel(mainModel).cuda()
+    mainModel = mainModel.cuda()
     learned_parameters = mainModel.parameters()
     optimizer = torch.optim.Adam(learned_parameters, lr=args.lr)
 
@@ -112,23 +89,19 @@ def main():
     criterion = nn.BCEWithLogitsLoss().cuda()
     criterion_event = nn.CrossEntropyLoss().cuda()
 
-    '''Resume from a checkpoint'''
     if os.path.isfile(args.resume):
         logger.info(f"\nLoading Checkpoint: {args.resume}\n")
         mainModel.load_state_dict(torch.load(args.resume))
     elif args.resume != "" and (not os.path.isfile(args.resume)):
         raise FileNotFoundError
 
-    '''Only Evaluate'''
     if args.evaluate:
         logger.info(f"\nStart Evaluation..")
         validate_epoch(mainModel, test_dataloader, criterion, criterion_event, epoch=0, eval_only=True)
         return
 
-    '''Tensorboard and Code backup'''
     writer = SummaryWriter(args.snapshot_pref)
 
-    '''Training and Testing'''
     for epoch in range(args.n_epoch):
         loss = train_epoch(mainModel, train_dataloader, criterion, criterion_event, optimizer, epoch)
         if ((epoch + 1) % args.eval_freq == 0) or (epoch == args.n_epoch - 1):
@@ -140,7 +113,7 @@ def main():
                 save_checkpoint(
                     mainModel.state_dict(),
                     top1=best_accuracy,
-                    task='Supervised',
+                    task='Supervised_GT',
                     epoch=epoch + 1,
                 )
             print("-----------------------------")
@@ -159,20 +132,20 @@ def train_epoch(model, train_dataloader, criterion, criterion_event, optimizer, 
     end_time = time.time()
 
     model.train()
-    model.double()
     optimizer.zero_grad()
 
     for n_iter, batch_data in enumerate(train_dataloader):
 
         data_time.update(time.time() - end_time)
-        '''Feed input to model'''
         visual_feature, text_feat, pseudo_label, audio_feat, audio_text_feat, audio_pseudo_label, labels = batch_data
         bs = visual_feature.shape[0]
-        labels = labels.double().cuda()
-        pseudo_label = pseudo_label.double().cuda()
-        visual_feature = visual_feature.double().cuda()
-        audio_feat = audio_feat.double().cuda()
-        audio_pseudo_label = audio_pseudo_label.double().cuda()
+        labels = labels.float().cuda()
+        pseudo_label = pseudo_label.float().cuda()
+        visual_feature = visual_feature.float().cuda()
+        text_feat = text_feat.float().cuda()
+        audio_feat = audio_feat.float().cuda()
+        audio_text_feat = audio_text_feat.float().cuda()
+        audio_pseudo_label = audio_pseudo_label.float().cuda()
         is_event_scores, event_scores, kl_loss, vis_is_event_scores, vis_event_scores, audio_is_event_scores, audio_event_scores = model(
             visual_feature, text_feat,
             audio_feat, audio_text_feat)
@@ -204,38 +177,31 @@ def train_epoch(model, train_dataloader, criterion, criterion_event, optimizer, 
 
         loss.backward()
 
-        '''Compute Accuracy'''
         acc = compute_accuracy_supervised(is_event_scores, event_scores, labels)
         train_acc.update(acc.item(), visual_feature.size(0) * 10)
 
-        '''Clip Gradient'''
         if args.clip_gradient is not None:
-            total_norm = clip_grad_norm_(model.parameters(), args.clip_gradient)
+            clip_grad_norm_(model.parameters(), args.clip_gradient)
 
-        '''Update parameters'''
         optimizer.step()
         optimizer.zero_grad()
 
         losses.update(loss.item(), visual_feature.size(0) * 10)
         batch_time.update(time.time() - end_time)
         end_time = time.time()
-        '''Add loss of a iteration in Tensorboard'''
         writer.add_scalar('Train_data/loss', losses.val, epoch * len(train_dataloader) + n_iter + 1)
 
-        '''Print logs in Terminal'''
         if n_iter % args.print_freq == 0:
             logger.info(
                 f'Train Epoch: [{epoch}][{n_iter}/{len(train_dataloader)}]\t'
                 f'Loss {losses.val:.4f} ({losses.avg:.4f})\t'
-                f'Prec@1 {train_acc.val:.3f} ({train_acc.avg: .3f})'
+                f'Prec@GT {train_acc.val:.3f} ({train_acc.avg:.3f})'
             )
 
-        '''Add loss of an epoch in Tensorboard'''
         writer.add_scalar('Train_epoch_data/epoch_loss', losses.avg, epoch)
     logger.info(
         f'**************************************************************************\t'
-        f"\tTrain results (acc): {train_acc.avg:.4f}%."
-
+        f"\tTrain results (acc @ GT): {train_acc.avg:.4f}%."
     )
     return losses.avg
 
@@ -252,19 +218,19 @@ def validate_epoch(model, test_dataloader, criterion, criterion_event, epoch, ev
     end_time = time.time()
     kl_losses = AverageMeter()
     model.eval()
-    model.double()
 
     for n_iter, batch_data in enumerate(test_dataloader):
         data_time.update(time.time() - end_time)
 
-        '''Feed input to model'''
         visual_feature, text_feat, pseudo_label, audio_feat, audio_text_feat, audio_pseudo_label, labels = batch_data
         bs = visual_feature.shape[0]
-        labels = labels.double().cuda()
-        pseudo_label = pseudo_label.double().cuda()
-        visual_feature = visual_feature.double().cuda()
-        audio_feat = audio_feat.double().cuda()
-        audio_pseudo_label = audio_pseudo_label.double().cuda()
+        labels = labels.float().cuda()
+        pseudo_label = pseudo_label.float().cuda()
+        visual_feature = visual_feature.float().cuda()
+        text_feat = text_feat.float().cuda()
+        audio_feat = audio_feat.float().cuda()
+        audio_text_feat = audio_text_feat.float().cuda()
+        audio_pseudo_label = audio_pseudo_label.float().cuda()
         is_event_scores, event_scores, kl_loss, vis_is_event_scores, vis_event_scores, audio_is_event_scores, audio_event_scores = model(
             visual_feature, text_feat, audio_feat, audio_text_feat)
         is_event_scores = is_event_scores.squeeze().contiguous()
@@ -298,22 +264,20 @@ def validate_epoch(model, test_dataloader, criterion, criterion_event, epoch, ev
         end_time = time.time()
         losses.update(loss.item(), bs * 10)
 
-        '''Print logs in Terminal'''
         if n_iter % args.print_freq == 0:
             logger.info(
                 f'Test Epoch [{epoch}][{n_iter}/{len(test_dataloader)}]\t'
                 f'Loss {losses.val:.4f} ({losses.avg:.4f})\t'
-                f'Prec@1 {accuracy.val:.3f} ({accuracy.avg:.3f})'
+                f'Prec@GT {accuracy.val:.3f} ({accuracy.avg:.3f})'
             )
 
-    '''Add loss in an epoch to Tensorboard'''
     if not eval_only:
         writer.add_scalar('Val_epoch_data/epoch_loss', losses.avg, epoch)
-        writer.add_scalar('Val_epoch/Accuracy', accuracy.avg, epoch)
+        writer.add_scalar('Val_epoch/Accuracy_GT', accuracy.avg, epoch)
 
     logger.info(
         f'**************************************************************************\t'
-        f"\tEvaluation results (acc): {accuracy.avg:.4f}%."
+        f"\tEvaluation results (acc @ GT): {accuracy.avg:.4f}%."
         f"\t results (kl_loss): {kl_losses.avg:.4f}%."
     )
     return accuracy.avg
@@ -327,7 +291,6 @@ def compute_accuracy_supervised(is_event_scores, event_scores, labels):
     _, event_class = event_scores.max(-1)
     pred = scores_pos_ind.long()
     pred *= event_class[:, None]
-    # add mask
     pred[scores_mask] = 28
     correct = pred.eq(targets)
     correct_num = correct.sum().double()
@@ -343,7 +306,3 @@ def save_checkpoint(state_dict, top1, task, epoch):
 
 if __name__ == '__main__':
     main()
-
-
-
-
