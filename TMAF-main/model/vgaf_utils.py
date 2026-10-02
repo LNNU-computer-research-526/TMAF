@@ -35,15 +35,6 @@ def vgaf_cross_modal_refine(vis_feat_encode, audio_feat_encode):
     return aligned + audio_feat_encode
 
 
-# Text block for manuscript / rebuttal (复杂度分析，式(11)修正后).
-VGAF_COMPLEXITY_ANALYSIS_ZH = """
-VGAF 跨模态对齐（式(11)）在实现中对每个视频独立计算注意力。设 batch 大小为 B，
-每个视频片段长度为 T，特征维度为 C。视觉与音频编码特征记为 F_v, F_a ∈ R^{B×T×C}。
-对第 b 个视频，注意力权重为
-  A^{(b)} = softmax( F_v^{(b)} (F_a^{(b)})^T / sqrt(C) ) ∈ R^{T×T}，
-精炼后的音频特征为 F̃_a^{(b)} = A^{(b)} F_a^{(b)} + F_a^{(b)}。
-时间复杂度为 O(B·T²·C)，额外显存 O(B·T²)。该形式与 mini-batch 中样本顺序无关，
-且同一 batch 内不同视频之间无注意力耦合。
 
 （修正说明）若将 batch 维与时间维展平为 (B·T, C) 再计算 (B·T)×(B·T) 的全局注意力，
 复杂度为 O(B²·T²·C)，且会引入跨视频交互，与「仅在单视频片段内对齐帧级视听特征」
