@@ -35,8 +35,3 @@ def vgaf_cross_modal_refine(vis_feat_encode, audio_feat_encode):
     return aligned + audio_feat_encode
 
 
-
-（修正说明）若将 batch 维与时间维展平为 (B·T, C) 再计算 (B·T)×(B·T) 的全局注意力，
-复杂度为 O(B²·T²·C)，且会引入跨视频交互，与「仅在单视频片段内对齐帧级视听特征」
-的设计不符；正文与代码已统一为按视频独立的 T×T 注意力。
-""".strip()
