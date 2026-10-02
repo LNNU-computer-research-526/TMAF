@@ -17,7 +17,7 @@ from configs.opts import parser
 from model.temp_video_model_yuanavesup import Temp_Model as main_model
 from utils import AverageMeter, Prepare_logger, get_and_save_args
 from utils.Recorder import Recorder
-from dataset.AVE_dataset_yuanaveweak import AVEDatasetV2
+from dataset.AVE_datasetV3 import AVEDatasetV2
 import torch.nn.functional as F
 
 # =================================  seed config ============================
